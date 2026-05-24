@@ -4,7 +4,10 @@
       "Bash(dir \"D:\\\\MIAT\\\\ViolaJonesMCU\" /s /b)",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(cd \"D:\\\\MIAT\\\\ViolaJonesMCU\" && gcc -Wall -Wextra -O2 -o test/test_vj.exe src/vj_integral.c src/vj_detect.c src/vj_cascade_data.c test/test_main.c -lm 2>&1)"
+      "Bash(cd \"D:\\\\MIAT\\\\ViolaJonesMCU\" && gcc -Wall -Wextra -O2 -o test/test_vj.exe src/vj_integral.c src/vj_detect.c src/vj_cascade_data.c test/test_main.c -lm 2>&1)",
+      "PowerShell(Test-Path *)",
+      "PowerShell($env:PATH -split \";\" | ForEach-Object { $_ }; echo \"---\"; python -c \"import ctypes; print\\('ctypes ok'\\)\")",
+      "Bash(git add *)"
     ]
   }
 }
