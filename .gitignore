@@ -1,0 +1,13 @@
+CLAUDE.md
+.DS_Store
+*.o
+*.a
+*.exe
+*.out
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
