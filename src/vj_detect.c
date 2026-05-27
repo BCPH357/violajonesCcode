@@ -87,15 +87,20 @@ int vj_detect_faces(const vj_cascade_t *cascade,
     float scale = 1.0f;
 
     while (1) {
-        int win_w = (int)(cascade->window_w * scale);
-        int win_h = (int)(cascade->window_h * scale);
+        /* Round to nearest (matches OpenCV cvRound) rather than floor-truncate.
+         * At scale^4≈2.07: floor gives 49 px, round gives 50 px — 1 px affects
+         * every feature offset (scale_x = win_w/24), hence cascade pass rate. */
+        int win_w = (int)(cascade->window_w * scale + 0.5f);
+        int win_h = (int)(cascade->window_h * scale + 0.5f);
         if (win_w > img_w || win_h > img_h)
             break;
 
-        /* Match OpenCV default: step=2 in scaled-image space = 2 pixels at base scale.
-         * We work in original image space, so step grows with window size to match
-         * OpenCV's effective step (yStep * scale in original coords, yStep=2 for scale<=2). */
-        int step = (int)(scale * 2.0f + 0.5f);
+        /* Match OpenCV's yStep rule:
+         *   scale <= 2: yStep=2 in downsampled coords → 2*scale px in original
+         *   scale >  2: yStep=1 in downsampled coords →   scale px in original
+         * Previously always used 2*scale, undersampling large windows by 2×. */
+        int ystep = (scale > 2.0f) ? 1 : 2;
+        int step  = (int)(ystep * scale + 0.5f);
         if (step < 1) step = 1;
 
         for (int y = 0; y + win_h <= img_h; y += step) {
