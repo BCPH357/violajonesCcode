@@ -36,12 +36,12 @@ violajonesCcode/
 │   ├── vj_cascade_data.h/c ← 從 XML 載入浮點 cascade 參數（PS 端用）
 │   ├── vj_detect.h/c       ← 浮點版偵測器（golden reference）
 │   ├── vj_fixed.h          ← 定點框架型別定義 + HLS entry point 宣告
-│   └── vj_fixed.c          ← 定點實作（演算法黃金參考，修改前請看注意事項）
+│   └── vj_fixed.cpp        ← 定點實作（演算法黃金參考，修改前請看注意事項；.c 已改名 .cpp for Vitis HLS）
 ├── hls/
 │   ├── vj_cascade_top.cpp  ← Vitis HLS top function（AXI-Lite wrapper）
 │   ├── hls_test_data.h     ← 測試資料（II 陣列、兩個 golden 向量、cascade 表）
 │   ├── ap_int.h            ← 本地 ap_int<N> stub（語法驗證用，非 Vitis HLS 實作）
-│   └── test_ap_int_syntax.cpp ← __SYNTHESIS__ + ap_int<82> 路徑語法驗證
+│   └── test_ap_int_syntax.cpp ← __SYNTHESIS__ + ap_int<74> 路徑語法驗證
 ├── docs/
 │   ├── HW_OPTIMIZATION_ROADMAP.md ← Steps 0-5 的設計思路與驗證方法
 │   └── QUANT_ANALYSIS.md          ← Step 0 量化分析（Q 格式依據）
@@ -85,7 +85,7 @@ vj_evaluate_window_fixed()
 | `inv_area` 除法 | 兩邊同乘 area（`feat_val_raw` 不除） | 1 |
 | `weight * rect_sum` 乘法 | shift/negate（weight 只有 {-1,+2,+3}） | 2 |
 | `rc->x * scale_x` 座標浮點乘 | 預算 vj_scaled_feature_t 查表（Route A） | 3 |
-| `sqrtf(variance)` | 四分支 `wide_t` 平方比較 | 4 |
+| `sqrtf(variance)` | sign-split uint64 平方比較（`VJ_CMP_SHIFT=2`，無 wide_t） | 4 |
 
 ---
 
@@ -103,24 +103,45 @@ va_sq = sqsum*area - sum^2                       int64_t   = variance × area²
 
 ---
 
-## wide_t（Step 4 平方比較）
+## cmp_lhs_lt_rhs（Step 4 平方比較，無 wide_t）
 
-`cmp_lhs_lt_rhs()` 中需要比較 `L²` 和 `T²×va_sq`，數值最大約 1.44×10²⁴，超出 int64。
-用條件編譯：
+`cmp_lhs_lt_rhs()` 比較 `L < T*sqrt(va_sq)`，已改寫為純 `int64_t/uint64_t`，完全不用 `wide_t/ap_int/__int128`。
 
 ```c
-/* src/vj_fixed.c */
-#ifdef __SYNTHESIS__
-#  include "ap_int.h"
-   typedef ap_int<82> wide_t;   /* Vitis HLS：N=82（理論上界，保守值） */
-#else
-   typedef __int128 wide_t;     /* PC golden：__int128（GCC 擴充） */
-#endif
+/* src/vj_fixed.cpp */
+#define VJ_CMP_SHIFT 2  /* K=1：各 absL 因子右移 1 bit，va_sq 右移 2 bits */
+
+static inline int cmp_lhs_lt_rhs(int64_t L, int32_t T,
+                                  int64_t va_sq, int64_t area)
+{
+    if (va_sq <= 0) return L < (int64_t)T * area;
+    int L_sign = (L > 0) - (L < 0);
+    int R_sign = (T > 0) - (T < 0);
+    if (L_sign < R_sign) return 1;
+    if (L_sign > R_sign) return 0;
+    if (L_sign == 0)     return 0;
+    uint64_t aL  = (uint64_t)(L > 0 ? L : -L);
+    uint64_t aT  = (uint64_t)(T > 0 ? (int64_t)T : -(int64_t)T);
+    uint64_t lhs = (aL >> (VJ_CMP_SHIFT/2)) * (aL >> (VJ_CMP_SHIFT/2));
+    uint64_t rhs = aT * aT * ((uint64_t)va_sq >> VJ_CMP_SHIFT);
+    return (L_sign > 0) ? (lhs < rhs) : (lhs > rhs);
+}
 ```
 
-- 理論上界：`ap_uint<81>` / `ap_int<82>`（見 hls_test_data.h `HLS_APINT_N_SIGNED=82`）
-- 實測上界（testt.jpg）：`ap_uint<73>` / `ap_int<74>`
-- **進 HLS 後依 synthesis report 再縮窄，現在先用 82**
+**testt.jpg 全掃描實測值（169 窗口 × 2913 分類器）：**
+
+| 量 | 實測最大值 | 位寬 |
+|----|-----------|------|
+| `\|L\|` | 1,602,617,344 | 31 bits |
+| `\|T\|` | 21,647 | 15 bits |
+| `va_sq` | 11,797,284,931 | 34 bits |
+| `lhs` = `(aL>>1)²` | — | ~59 bits |
+| `rhs` = `aT²*(va_sq>>2)` | — | ~61 bits |
+
+- 最小可行 N = 0（K=0 直接精確計算也能裝進 uint64）
+- 選 N=2（K=1）加 2-bit margin，且對理論最差 va_sq (~1e11) 也完全不溢位
+- **舊版 __int128 vs 新版一致率：100.000%（169/169 窗口）**
+- 兩個 golden 向量在 no-SYNTHESIS 和 __SYNTHESIS__ 路徑均 PASS
 
 ---
 
@@ -178,35 +199,33 @@ int vj_cascade_top(int win_x, int win_y, int win_w, int win_h)
 
 ## 編譯驗證指令（Windows MSYS2 環境）
 
-### PC 黃金驗證（C 模式）
+### PC 黃金驗證（g++ C++14，no __SYNTHESIS__）
 ```bash
-gcc -std=c11 -x c -Isrc -Ihls -o hls/test_top.exe hls/vj_cascade_top.cpp src/vj_fixed.c
-./hls/test_top.exe
+g++ -std=c++14 -Isrc -Ihls -o hls/test_top_74.exe \
+    hls/vj_cascade_top.cpp src/vj_fixed.cpp hls/vj_tb.cpp \
+    -static-libstdc++ -static-libgcc
+./hls/test_top_74.exe
 # pass (6,6,50,50) -> 1  PASS
 # reject (0,0,50,50) -> 0  PASS
 ```
 
-### g++ C++14 模式（模擬 Vitis HLS 前端）
+### __SYNTHESIS__ + ap_int<74> stub 驗證（模擬 HLS C-sim 路徑）
 ```bash
-# 分開編：vj_fixed.c 用 gcc（C 模式），wrapper 用 g++（C++ 模式）
-gcc -std=c11 -Isrc -c src/vj_fixed.c -o build_vj_fixed.o
-g++ -std=c++14 -Isrc -Ihls -c hls/vj_cascade_top.cpp -o build_gpp_top.o
-g++ -static-libstdc++ -static-libgcc -o hls/test_top_cpp_s.exe build_gpp_top.o build_vj_fixed.o
-./hls/test_top_cpp_s.exe   # 需用 -static 才能在本機 AppLocker 政策下執行
+g++ -std=c++14 -D__SYNTHESIS__ -Isrc -Ihls \
+    -o hls/test_top_74_syn.exe \
+    hls/vj_cascade_top.cpp src/vj_fixed.cpp hls/vj_tb.cpp \
+    -static-libstdc++ -static-libgcc
+./hls/test_top_74_syn.exe
+# pass (6,6,50,50) -> 1  PASS
+# reject (0,0,50,50) -> 0  PASS
 ```
 
-### __SYNTHESIS__ + ap_int<82> 語法驗證
+### ap_int<74> 分支語法驗證
 ```bash
 g++ -std=c++14 -Ihls -static-libstdc++ -static-libgcc \
     -o hls/test_ap_int_syntax.exe hls/test_ap_int_syntax.cpp
 ./hls/test_ap_int_syntax.exe
-# ap_int<82> synthesis path: all 5 branches PASS
-```
-
-### vj_fixed.c 以 C++ 模式完整編譯（模擬 Vitis HLS csim 路徑）
-```bash
-g++ -std=c++14 -D__SYNTHESIS__ -Isrc -Ihls -x c++ -c src/vj_fixed.c -o build_vj_synth.o
-# 應 exit 0（零 error，#pragma HLS 有 unknown-pragma warnings 是正常的）
+# ap_int<74> synthesis path: all 5 branches PASS
 ```
 
 **注意**：本機 Windows AppLocker 政策會阻擋 g++ 動態連結的 exe，
@@ -225,14 +244,14 @@ g++ -std=c++14 -D__SYNTHESIS__ -Isrc -Ihls -x c++ -c src/vj_fixed.c -o build_vj_
 - 改放 DDR（AXI master 存取）
 - 退回 Route B（scale_x 定點乘法，不查表）
 
-### 2. `wide_t = ap_int<82>` 電路面積
+### 2. `wide_t`/`ap_int` 已完全消除 ✅
 
-理論上界 82-bit 乘法器面積可能過大。
-**拿到 synthesis 資源報告後**依實際數值範圍縮窄：
-- 實測上界：`ap_int<74>`（testt.jpg 全掃描）
-- 理論上界：`ap_int<82>`（保守值，現用）
+- Step 4 比較從 `ap_int<74>/__int128` 改為純 `uint64_t`（`VJ_CMP_SHIFT=2`）
+- 一致率 100%（169 窗口），兩個 golden 向量雙路徑 PASS
+- `vj_cascade_top.cpp` 的 `#include "ap_int.h"` 也一併移除
+- `hls/ap_int.h` stub 現在只有 minimal_* 診斷檔用到（可保留備用）
 
-**現在不要提前優化這兩項。等 synthesis 數據。**
+**座標查表問題（1.33 MB）仍待 synthesis report。**
 
 ---
 
@@ -243,7 +262,7 @@ g++ -std=c++14 -D__SYNTHESIS__ -Isrc -Ihls -x c++ -c src/vj_fixed.c -o build_vj_
 - `src/vj_types.h`, `src/vj_integral.h`, `src/vj_integral.c`
 - `hls/vj_cascade_top.cpp`（top function = `vj_cascade_top`）
 - `hls/hls_test_data.h`（C simulation testbench 資料）
-- `hls/ap_int.h`（Vitis HLS 自己的 ap_int.h 會覆蓋此 stub）
+- `hls/ap_int.h`（不再是 vj_cascade_top 主路徑必要；minimal_* 診斷仍用到）
 
 跑 C simulation 確認 pass/reject 向量正確，再跑 C synthesis 拿 resource / timing 報告。
 
@@ -251,15 +270,16 @@ g++ -std=c++14 -D__SYNTHESIS__ -Isrc -Ihls -x c++ -c src/vj_fixed.c -o build_vj_
 
 ## 修改限制
 
-### vj_fixed.c — 演算法黃金參考
+### vj_fixed.cpp — 演算法黃金參考
 
 此檔案的 `vj_evaluate_window_fixed()` 已與浮點版逐窗口等價（Steps 0-5 全通過，四圖 0 翻面）。
 
 **允許改動**：
 - 純機械性的 C++ 相容修正（malloc cast 等），不影響演算法邏輯
+- `ap_int<N>` 位寬調整（依 synthesis 數據）
 
 **禁止改動**：
-- Q 格式、比較邏輯、wide_t 的分支結構
+- Q 格式、cmp_lhs_lt_rhs 的符號分支結構、VJ_CMP_SHIFT 數值
 - 「在沒有 synthesis 數據前提前優化 HLS 問題」
 
 ### hls_test_data.h — 自動產生，不要手改

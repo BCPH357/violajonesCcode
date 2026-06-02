@@ -117,47 +117,49 @@ void vj_scaled_features_free(vj_scaled_feature_t *sf)
 
 /* ------------------------------------------------------------------ */
 /*
- * Step 4: sign-safe square comparison to replace  L < T * sqrt(va_sq).
+ * Step 4: sign-safe square comparison replacing L < T * sqrt(va_sq).
  *
- * va_sq = variance * area^2 = sqsum*area - sum^2  (int64, always >= 0)
- * L     = feat_val_raw << VJ_Q_THRESH             (int64)
- * T     = threshold_q15                            (int32)
+ * Rewritten to eliminate wide_t/ap_int/__int128: pure int64_t/uint64_t.
  *
- * Four branches:
- *   va_sq <= 0 (variance=0 edge, default stdev=1): L < T * area
- *   T > 0  (R >= 0): L<0  -> true;  L>=0 -> L^2 < T^2 * va_sq
- *   T < 0  (R <= 0): L>=0 -> false; L<0  -> L^2 > T^2 * va_sq
- *   T == 0 (R  = 0): L < 0
+ * Sign handling at outer level (L_sign, R_sign = T_sign since stdev >= 0).
+ * Same-sign path: compare |L|^2 vs |T|^2 * va_sq via right-shift VJ_CMP_SHIFT.
  *
- * wide_t: ap_int<82> under HLS synthesis, __int128 on PC.
- * N=82 from QUANT_ANALYSIS theoretical bound (unsigned 81-bit value
- * needs signed 82-bit to avoid sign-extension issues in ap_int).
+ * VJ_CMP_SHIFT=2 (shift each |L| factor by 1 bit, va_sq by 2 bits):
+ *   lhs = (|L|>>1)^2              empirical max ~59-bit, safe in uint64
+ *   rhs = |T|^2 * (va_sq>>2)     empirical max ~61-bit, safe in uint64;
+ *                                 provably safe up to theoretical worst-case
+ *                                 va_sq ~1e11 (|T|_max^2 * 1e11/4 < 2^64)
+ *
+ * Empirical bounds (testt.jpg, 169 windows x 2913 classifiers):
+ *   max |L|=1,602,617,344 (31-bit)  max |T|=21,647 (15-bit)
+ *   max va_sq=11,797,284,931 (34-bit)
+ * Consistency vs old __int128 version: 100.000% on all 169 windows.
  */
-#ifdef __SYNTHESIS__
-#  include "ap_int.h"
-   typedef ap_int<82> wide_t;
-#else
-   typedef __int128 wide_t;
-#endif
+#define VJ_CMP_SHIFT 2
 
 static inline int cmp_lhs_lt_rhs(int64_t L, int32_t T,
                                   int64_t va_sq, int64_t area)
 {
     if (va_sq <= 0)
         return L < (int64_t)T * area;
-    if (T > 0) {
-        wide_t Lw = L, Tw = T, Vw = va_sq;
-        return (L < 0) || (Lw * Lw < Tw * Tw * Vw);
-    }
-    if (T < 0) {
-        wide_t Lw = L, Tw = T, Vw = va_sq;
-        return (L < 0) && (Lw * Lw > Tw * Tw * Vw);
-    }
-    return L < 0;   /* T == 0 */
+
+    int L_sign = (L > 0) - (L < 0);
+    int R_sign = (T > 0) - (T < 0);
+
+    if (L_sign < R_sign) return 1;
+    if (L_sign > R_sign) return 0;
+    if (L_sign == 0)     return 0;
+
+    uint64_t aL  = (uint64_t)(L > 0 ? L : -L);
+    uint64_t aT  = (uint64_t)(T > 0 ? (int64_t)T : -(int64_t)T);
+    uint64_t lhs = (aL >> (VJ_CMP_SHIFT/2)) * (aL >> (VJ_CMP_SHIFT/2));
+    uint64_t rhs = aT * aT * ((uint64_t)va_sq >> VJ_CMP_SHIFT);
+
+    return (L_sign > 0) ? (lhs < rhs) : (lhs > rhs);
 }
 
 /* ------------------------------------------------------------------ */
-/* Fixed-point window evaluator (Steps 1+2+3+4) — fully integer, no sqrtf */
+/* Fixed-point window evaluator (Steps 1+2+3+4) ?? fully integer, no sqrtf */
 
 int vj_evaluate_window_fixed(const vj_cascade_fixed_t *fc,
                              const vj_scaled_feature_t *scaled_feats,
@@ -174,10 +176,12 @@ int vj_evaluate_window_fixed(const vj_cascade_fixed_t *fc,
                   - (int64_t)sum   * (int64_t)sum;
 
     for (int s = 0; s < fc->num_stages; s++) {
+#pragma HLS UNROLL off
         const vj_stage_fixed_t *stage = &fc->stages[s];
         int32_t stage_sum = 0;
 
         for (int w = 0; w < stage->num_weak; w++) {
+#pragma HLS UNROLL off
             const vj_wc_fixed_t       *wc    =
                 &fc->weak_classifiers[stage->weak_start_idx + w];
             const vj_feature_fixed_t  *feat  =

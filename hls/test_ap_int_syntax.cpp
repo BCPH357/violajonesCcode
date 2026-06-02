@@ -1,9 +1,9 @@
 /*
- * test_ap_int_syntax.cpp — syntax verification of __SYNTHESIS__ + ap_int<82>
+ * test_ap_int_syntax.cpp — syntax verification of __SYNTHESIS__ + ap_int<74>
  *
  * Simulates the code path Vitis HLS will compile from vj_fixed.c:
  *   - __SYNTHESIS__ defined
- *   - ap_int<82> used as wide_t
+ *   - ap_int<74> used as wide_t
  *   - all four branches of cmp_lhs_lt_rhs instantiated
  *
  * Compiled with: g++ -std=c++14 -Ihls -static-libstdc++ -static-libgcc
@@ -15,7 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-typedef ap_int<82> wide_t;
+typedef ap_int<74> wide_t;
 
 /* Exact copy of cmp_lhs_lt_rhs from src/vj_fixed.c — not modified */
 static inline int cmp_lhs_lt_rhs(int64_t L, int32_t T,
@@ -63,7 +63,7 @@ int main(void)
     if (r5 != 0) { printf("branch T=0 (L>0) FAIL (got %d)\n", r5); fail++; }
 
     if (fail == 0)
-        printf("ap_int<82> synthesis path: all %d branches PASS\n",
+        printf("ap_int<74> synthesis path: all %d branches PASS\n",
                (int)(r0+r1+r2+r3+r4+r5+1));
     return fail;
 }

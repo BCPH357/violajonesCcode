@@ -30,7 +30,7 @@
  *     vj_rect_sum()       — 4 array reads, 3 adds
  *     vj_rect_sum_sq()    — same pattern on squared-sum II
  *     vj_apply_weight()   — switch on 2-bit weight_code
- *     cmp_lhs_lt_rhs()    — four-branch __int128 square compare
+ *     cmp_lhs_lt_rhs()    — sign-split uint64 square compare (no wide_t)
  */
 
 /* ---------- Q-format constants ---------- */
@@ -136,9 +136,9 @@ void                 vj_scaled_features_free(vj_scaled_feature_t *sf);
  *   - left/right_val, stage_sum, stage_threshold: Q6.10
  *   - weight multiply replaced by shift/negate via weight_code
  *   - coord scaling: precomputed lookup (no float multiply at runtime)
- *   - sqrtf eliminated: four-branch sign-safe square comparison
+ *   - sqrtf eliminated: sign-split uint64 square compare (VJ_CMP_SHIFT=2)
  *     va_sq = sqsum*area - sum^2  (int64, = variance*area^2)
- *     L^2 / T^2*va_sq compared in __int128 (overflow-safe)
+ *     |L|^2 vs |T|^2*va_sq in uint64 only, no wide_t/ap_int/__int128
  *
  * scaled_feats must correspond to the current win_w/win_h scale level.
  */
