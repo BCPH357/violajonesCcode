@@ -1,15 +1,16 @@
 /*
- * vj_cascade_top.cpp — Vitis HLS AXI-Lite top function (A version)
+ * vj_cascade_top.cpp — Vitis HLS AXI-Lite top function (rung1)
  *
- * HLS entry point: vj_cascade_top()
- *   - All ports mapped to AXI-Lite bundle CTRL
- *   - II/sII arrays and cascade tables baked in from hls_test_data.h
- *   - Delegates to vj_evaluate_window_fixed() in vj_fixed.c
+ * rung1 change: call vj_evaluate_window_fixed_flat() instead of
+ * vj_evaluate_window_fixed().  The three lookup tables are passed as
+ * independent const-array parameters (g_stages, g_weak_classifiers,
+ * g_features_fixed) rather than via the &g_cascade struct pointer.
+ * g_cascade is no longer referenced by the top function or its callees.
  *
  * PC compilation (no __SYNTHESIS__):
- *   g++ -std=c++11 -Isrc -Ihls -o hls/test_top \
- *       hls/vj_cascade_top.cpp src/vj_fixed.c
- *   ./hls/test_top   -> both PASS expected
+ *   g++ -std=c++11 -Isrc -Ihls \
+ *       hls/vj_cascade_top.cpp src/vj_fixed.cpp hls/vj_tb.cpp \
+ *       -o hls/test_rung1 -static-libstdc++ -static-libgcc
  */
 
 #include "vj_fixed.h"
@@ -32,7 +33,8 @@ int vj_cascade_top(int win_x, int win_y, int win_w, int win_h)
 #pragma HLS array_partition variable=g_weak_classifiers off=true
 #pragma HLS array_partition variable=g_stages           off=true
 
-    return vj_evaluate_window_fixed(&g_cascade, g_scaled,
-                                    g_test_ii, g_test_sii, TEST_II_STRIDE,
-                                    win_x, win_y, win_w, win_h);
+    return vj_evaluate_window_fixed_flat(
+        g_stages, 25, g_weak_classifiers, g_features_fixed, g_scaled,
+        g_test_ii, g_test_sii, TEST_II_STRIDE,
+        win_x, win_y, win_w, win_h);
 }

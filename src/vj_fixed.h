@@ -148,6 +148,15 @@ int vj_evaluate_window_fixed(const vj_cascade_fixed_t *fc,
                              int ii_stride,
                              int win_x, int win_y, int win_w, int win_h);
 
+/* rung1 variant: flat parameters, no vj_cascade_fixed_t* indirection. */
+int vj_evaluate_window_fixed_flat(
+    const vj_stage_fixed_t   *stages,      int num_stages,
+    const vj_wc_fixed_t      *wcs,
+    const vj_feature_fixed_t *feats,
+    const vj_scaled_feature_t *scaled_feats,
+    const uint32_t *ii, const uint64_t *sii, int ii_stride,
+    int win_x, int win_y, int win_w, int win_h);
+
 #ifdef __cplusplus
 }
 #endif

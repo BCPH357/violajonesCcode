@@ -163,7 +163,7 @@ static inline int cmp_lhs_lt_rhs(int64_t L, int32_t T,
 }
 
 /* ------------------------------------------------------------------ */
-/* Fixed-point window evaluator (Steps 1+2+3+4) ?? fully integer, no sqrtf */
+/* Fixed-point window evaluator (Steps 1+2+3+4) — fully integer, no sqrtf */
 
 int vj_evaluate_window_fixed(const vj_cascade_fixed_t *fc,
                              const vj_scaled_feature_t *scaled_feats,
@@ -204,6 +204,64 @@ int vj_evaluate_window_fixed(const vj_cascade_fixed_t *fc,
             }
 
             /* Step 4: L < T*sqrt(va_sq) without sqrtf */
+            int64_t L = (int64_t)feat_val_raw << VJ_Q_THRESH;
+            int lhs_lt_rhs = cmp_lhs_lt_rhs(L, wc->threshold_q15, va_sq, area);
+
+            stage_sum += lhs_lt_rhs ? wc->left_val_q10 : wc->right_val_q10;
+        }
+
+        if (stage_sum < stage->stage_threshold_q10)
+            return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* rung1 variant: flat-parameter version — no vj_cascade_fixed_t* pointer.
+ *
+ * Identical algorithm to vj_evaluate_window_fixed(); the only difference
+ * is that the three lookup tables (stages, wcs, feats) are passed as
+ * independent const-array parameters instead of being reached through the
+ * fc struct pointer.  This removes one level of pointer indirection from
+ * the HLS frontend's call graph, which may prevent the recursive
+ * pointer-resolution pass from stack-overflowing on large designs.
+ */
+int vj_evaluate_window_fixed_flat(
+    const vj_stage_fixed_t   *stages,      int num_stages,
+    const vj_wc_fixed_t      *wcs,
+    const vj_feature_fixed_t *feats,
+    const vj_scaled_feature_t *scaled_feats,
+    const uint32_t *ii, const uint64_t *sii, int ii_stride,
+    int win_x, int win_y, int win_w, int win_h)
+{
+    uint32_t sum   = vj_rect_sum   (ii,  ii_stride, win_x, win_y, win_w, win_h);
+    uint64_t sqsum = vj_rect_sum_sq(sii, ii_stride, win_x, win_y, win_w, win_h);
+
+    int64_t area  = (int64_t)(win_w * win_h);
+    int64_t va_sq = (int64_t)sqsum * area
+                  - (int64_t)sum   * (int64_t)sum;
+
+    for (int s = 0; s < num_stages; s++) {
+#pragma HLS UNROLL off
+        const vj_stage_fixed_t *stage = &stages[s];
+        int32_t stage_sum = 0;
+
+        for (int w = 0; w < stage->num_weak; w++) {
+#pragma HLS UNROLL off
+            const vj_wc_fixed_t       *wc    = &wcs[stage->weak_start_idx + w];
+            const vj_feature_fixed_t  *feat  = &feats[wc->feature_idx];
+            const vj_scaled_feature_t *sfeat = &scaled_feats[wc->feature_idx];
+
+            int32_t feat_val_raw = 0;
+            for (int r = 0; r < feat->num_rects; r++) {
+                int rx = win_x + sfeat->rects[r].dx;
+                int ry = win_y + sfeat->rects[r].dy;
+                int rw = sfeat->rects[r].rw;
+                int rh = sfeat->rects[r].rh;
+                int32_t rs = (int32_t)vj_rect_sum(ii, ii_stride, rx, ry, rw, rh);
+                feat_val_raw += vj_apply_weight(rs, feat->rects[r].weight_code);
+            }
+
             int64_t L = (int64_t)feat_val_raw << VJ_Q_THRESH;
             int lhs_lt_rhs = cmp_lhs_lt_rhs(L, wc->threshold_q15, va_sq, area);
 
