@@ -1,8 +1,11 @@
 #include "vj_fixed.h"
 #include "vj_integral.h"
-#include <stdlib.h>
 
 /* ------------------------------------------------------------------ */
+/* Build helpers: malloc/free — excluded from HLS synthesis call graph  */
+#ifndef __SYNTHESIS__
+#include <stdlib.h>
+
 static inline int32_t to_q(float v, int q_bits)
 {
     float scaled = v * (float)(1 << q_bits);
@@ -114,6 +117,7 @@ void vj_scaled_features_free(vj_scaled_feature_t *sf)
 {
     free(sf);
 }
+#endif /* !__SYNTHESIS__ */
 
 /* ------------------------------------------------------------------ */
 /*
